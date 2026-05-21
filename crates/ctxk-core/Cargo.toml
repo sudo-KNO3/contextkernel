@@ -1,0 +1,14 @@
+[package]
+name        = "ctxk-core"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+repository.workspace = true
+description = "Core types, enums, and error definitions for ContextKernel"
+
+[dependencies]
+serde.workspace     = true
+thiserror.workspace = true
+time.workspace      = true
+ulid.workspace      = true

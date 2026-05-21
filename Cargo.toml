@@ -1,0 +1,54 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ctxk-core",
+    "crates/ctxk-store",
+    "crates/ctxk-retrieval",
+    "crates/ctxk-server",
+    "crates/ctxk-cli",
+]
+
+[workspace.package]
+version    = "0.1.0"
+edition    = "2021"
+authors    = ["sudo-KNO3"]
+license    = "MIT"
+repository = "https://github.com/sudo-KNO3/contextkernel"
+
+[workspace.dependencies]
+# Internal crates
+ctxk-core      = { path = "crates/ctxk-core" }
+ctxk-store     = { path = "crates/ctxk-store" }
+ctxk-retrieval = { path = "crates/ctxk-retrieval" }
+
+# Foundation
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+anyhow      = "1"
+thiserror   = "2"
+
+# Storage / parse
+rusqlite    = { version = "0.32", features = ["bundled"] }
+scraper     = "0.20"
+walkdir     = "2"
+ulid        = "1"
+sha2        = "0.10"
+time        = { version = "0.3", features = ["serde", "macros", "formatting", "parsing"] }
+regex       = "1"
+
+# HTTP
+axum        = "0.7"
+tokio       = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net"] }
+tower-http  = { version = "0.5", features = ["cors", "trace"] }
+
+# CLI
+clap        = { version = "4", features = ["derive"] }
+
+# Logging
+tracing             = "0.1"
+tracing-subscriber  = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+opt-level     = 3
+lto           = "thin"
+codegen-units = 1

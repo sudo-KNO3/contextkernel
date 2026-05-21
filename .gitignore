@@ -1,0 +1,19 @@
+/target
+**/*.rs.bk
+
+# Python build artefacts
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+
+# Local vault (per-user, never commit)
+.contextkernel/
+vault/
+
+# Editor / OS
+.vscode/
+.idea/
+*.iml
+.DS_Store
+Thumbs.db

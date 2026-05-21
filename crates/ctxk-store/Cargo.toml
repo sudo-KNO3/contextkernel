@@ -1,0 +1,21 @@
+[package]
+name        = "ctxk-store"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+repository.workspace = true
+description = "HTML <-> SQLite storage + FTS for ContextKernel"
+
+[dependencies]
+ctxk-core.workspace = true
+rusqlite.workspace  = true
+scraper.workspace   = true
+walkdir.workspace   = true
+sha2.workspace      = true
+time.workspace      = true
+serde.workspace     = true
+serde_json.workspace = true
+ulid.workspace      = true
+thiserror.workspace = true
+tracing.workspace   = true
