@@ -1,17 +1,20 @@
-//! Query parsing + candidate retrieval (FTS5 + metadata filter).
+//! Query parsing + candidate retrieval.
+//!
+//! Hybrid: FTS5 candidate pool ∪ top-K semantic neighbours from the
+//! in-memory cosine sweep. The reranker then combines per-item signals.
 
 use crate::rerank;
-use ctxk_core::{KnowledgeItem, Result, Scope};
+use ctxk_core::{EmbedderProvider, KnowledgeItem, Result, Scope};
+use ctxk_embed::{bytes_to_vec, dot, normalise};
 use ctxk_store::{sqlite::ListFilters, Store};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 
-/// What an AI agent / client asks for. All fields except `task` are
-/// optional; defaults are permissive (broad recall, narrow scope).
+const SEMANTIC_TOP_K: usize = 50;
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Query {
-    /// Natural-language task description. Used both as the FTS query
-    /// and as the rerank "intent".
     pub task: String,
     pub scope: Option<String>,
     pub scope_path: Option<String>,
@@ -46,14 +49,16 @@ pub struct Scored {
     pub score_breakdown: rerank::Breakdown,
 }
 
-/// Execute the query: fetch candidates from the store, hard-filter,
-/// rerank, truncate to `max_items`. Conflict detection is layered on
-/// at bundle-assembly time.
-pub fn execute(store: &Store, q: &Query) -> Result<Vec<Scored>> {
-    let _ = store.sweep_stale(); // best-effort lazy sweep
+/// Execute the query with an optional embedder. When the embedder is
+/// `None` the search degrades to lexical-only (session-1 behaviour).
+pub fn execute(
+    store: &Store,
+    q: &Query,
+    embedder: Option<&dyn EmbedderProvider>,
+) -> Result<Vec<Scored>> {
+    let _ = store.sweep_stale();
 
-    // Candidate pool: FTS or, if the task is empty, fall back to a metadata-only
-    // listing so callers can still walk the vault.
+    // ── 1. FTS candidate pool ─────────────────────────────────────────────
     let fts_query = if q.task.trim().is_empty() {
         None
     } else {
@@ -68,65 +73,88 @@ pub fn execute(store: &Store, q: &Query) -> Result<Vec<Scored>> {
     } else {
         vec!["active".to_string()]
     };
-
-    // First try: with all the per-call filters. If we get nothing back AND
-    // the user supplied filter knobs, widen progressively. (Improves the
-    // "nothing matched" UX without surprising power users.)
-    let mut candidates: Vec<KnowledgeItem> = Vec::new();
-    let want_types: Option<Vec<String>> = q.knowledge_types.clone();
-    let want_domains: Option<Vec<String>> = q.domains.clone();
-    let want_tags: Option<Vec<String>> = q.tags_any.clone();
-
-    // Pull a generous pool (5x max_items, capped 200) for reranking.
     let pool_size = (q.max_items.max(1) * 5).min(200);
-    for attempt in 0..2 {
-        let filters = ListFilters {
-            scope: None,                       // filter scope in Rust (chain-aware)
-            knowledge_type: None,              // filter type in Rust (Vec)
-            domain: None,                      // filter domain in Rust (Vec)
-            tag: None,                         // filter tags in Rust (any-of)
-            q: fts_query.clone(),
-            include_status: include_status.clone(),
-            limit: Some(pool_size as i64),
-            offset: None,
-        };
-        candidates = store.list_items(&filters)?;
-        candidates.retain(|it| in_scope_chain(it, &q.scope));
-        if let Some(types) = &want_types {
-            if !types.is_empty() {
-                candidates.retain(|it| types.iter().any(|t| t == it.knowledge_type.as_str()));
+    let filters = ListFilters {
+        scope: None,
+        knowledge_type: None,
+        domain: None,
+        tag: None,
+        q: fts_query.clone(),
+        include_status: include_status.clone(),
+        limit: Some(pool_size as i64),
+        offset: None,
+    };
+    let mut fts_candidates = store.list_items(&filters)?;
+    let fts_ids: HashSet<String> = fts_candidates.iter().map(|i| i.id.clone()).collect();
+
+    // ── 2. Semantic candidate pool ────────────────────────────────────────
+    let mut semantic_scores: HashMap<String, f32> = HashMap::new();
+    if let (Some(em), false) = (embedder, q.task.trim().is_empty()) {
+        let mut query_vec = em.embed_batch(&[q.task.clone()])?;
+        if let Some(mut q_emb) = query_vec.pop() {
+            normalise(&mut q_emb);
+            let status_refs: Vec<&str> = include_status.iter().map(|s| s.as_str()).collect();
+            let all_embeds = store.list_embeddings(None, &status_refs)?;
+            let mut topk: Vec<(String, f32)> = all_embeds
+                .into_iter()
+                .map(|(id, bytes)| {
+                    let v = bytes_to_vec(&bytes);
+                    let s = if v.len() == q_emb.len() { dot(&v, &q_emb) } else { 0.0 };
+                    (id, s)
+                })
+                .collect();
+            topk.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            topk.truncate(SEMANTIC_TOP_K);
+            for (id, score) in topk {
+                semantic_scores.insert(id, score);
             }
-        }
-        if let Some(domains) = &want_domains {
-            if !domains.is_empty() {
-                candidates.retain(|it| {
-                    it.domain.as_deref().map(|d| domains.iter().any(|w| w == d)).unwrap_or(false)
-                });
-            }
-        }
-        if let Some(tags) = &want_tags {
-            if !tags.is_empty() {
-                candidates.retain(|it| tags.iter().any(|t| it.tags.iter().any(|x| x == t)));
-            }
-        }
-        if !candidates.is_empty() {
-            break;
-        }
-        // Widen on second pass: drop the FTS query, keep filters.
-        if attempt == 0 && fts_query.is_some() {
-            // re-run loop body with fts_query = None
-            // we'll handle by mutating the local; simplest: emulate by clearing
-            // (only the first iteration uses fts_query when set).
-        } else {
-            break;
         }
     }
 
-    // Rerank + truncate.
-    let mut scored: Vec<Scored> = candidates
+    // ── 3. Union pool + per-call filters ──────────────────────────────────
+    // Fetch any semantic-only candidates that weren't already in FTS.
+    let extra_ids: Vec<String> = semantic_scores
+        .keys()
+        .filter(|id| !fts_ids.contains(id.as_str()))
+        .cloned()
+        .collect();
+    for id in &extra_ids {
+        if let Ok(Some(it)) = store.get_item(id) {
+            fts_candidates.push(it);
+        }
+    }
+    // Filters: scope chain + type / domain / tags-any.
+    fts_candidates.retain(|it| in_scope_chain(it, &q.scope));
+    if let Some(types) = &q.knowledge_types {
+        if !types.is_empty() {
+            fts_candidates.retain(|it| types.iter().any(|t| t == it.knowledge_type.as_str()));
+        }
+    }
+    if let Some(domains) = &q.domains {
+        if !domains.is_empty() {
+            fts_candidates.retain(|it| {
+                it.domain
+                    .as_deref()
+                    .map(|d| domains.iter().any(|w| w == d))
+                    .unwrap_or(false)
+            });
+        }
+    }
+    if let Some(tags) = &q.tags_any {
+        if !tags.is_empty() {
+            fts_candidates.retain(|it| {
+                tags.iter().any(|t| it.tags.iter().any(|x| x == t))
+            });
+        }
+    }
+
+    // ── 4. Rerank + truncate ──────────────────────────────────────────────
+    let mut scored: Vec<Scored> = fts_candidates
         .into_iter()
         .map(|item| {
-            let (score, breakdown) = rerank::score(&item, q);
+            let in_fts = fts_ids.contains(&item.id);
+            let semantic = semantic_scores.get(&item.id).copied().unwrap_or(0.0) as f64;
+            let (score, breakdown) = rerank::score(&item, q, semantic, in_fts);
             Scored {
                 item,
                 score,
@@ -139,20 +167,14 @@ pub fn execute(store: &Store, q: &Query) -> Result<Vec<Scored>> {
     Ok(scored)
 }
 
-/// Scope inclusion: if a request scope is given, an item must be in the
-/// item's own scope OR a "more general" scope on the chain. With no scope
-/// given, all scopes pass.
 fn in_scope_chain(item: &KnowledgeItem, requested: &Option<String>) -> bool {
     let Some(req) = requested else {
         return true;
     };
     let req_scope = Scope::parse(req);
-    let allowed = scope_chain(req_scope);
-    allowed.iter().any(|s| *s == item.scope)
+    scope_chain(req_scope).iter().any(|s| *s == item.scope)
 }
 
-/// `session > project > user > workspace > organization > global`
-/// A `session` query sees everything; a `global` query sees only `global`.
 fn scope_chain(s: Scope) -> Vec<Scope> {
     match s {
         Scope::Session => vec![
@@ -177,9 +199,6 @@ fn scope_chain(s: Scope) -> Vec<Scope> {
     }
 }
 
-/// FTS5 query escaper. The user's natural-language `task` is split into
-/// tokens; each token becomes a `"quoted"` term, OR'd. This avoids syntax
-/// errors when the user types punctuation.
 fn sanitise_fts(s: &str) -> String {
     s.split_whitespace()
         .map(|t| t.chars().filter(|c| c.is_alphanumeric() || *c == '-').collect::<String>())

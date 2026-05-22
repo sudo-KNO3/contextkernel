@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/ctxk-core",
     "crates/ctxk-store",
+    "crates/ctxk-embed",
     "crates/ctxk-retrieval",
     "crates/ctxk-server",
     "crates/ctxk-cli",
@@ -19,6 +20,7 @@ repository = "https://github.com/sudo-KNO3/contextkernel"
 # Internal crates
 ctxk-core      = { path = "crates/ctxk-core" }
 ctxk-store     = { path = "crates/ctxk-store" }
+ctxk-embed     = { path = "crates/ctxk-embed" }
 ctxk-retrieval = { path = "crates/ctxk-retrieval" }
 
 # Foundation

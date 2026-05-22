@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ContextKernel — Graph</title>
+<script src="/d3.v7.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #161922;
+    --border: #2a2f3a;
+    --text: #e0e3ea;
+    --dim: #7a8092;
+    --accent: #6ec1e4;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100vh; background: var(--bg);
+               color: var(--text); font: 14px/1.4 system-ui, sans-serif; }
+  #wrap {
+    display: grid;
+    grid-template-columns: 260px 1fr;
+    height: 100vh;
+  }
+  aside {
+    background: var(--panel);
+    border-right: 1px solid var(--border);
+    padding: 18px;
+    overflow-y: auto;
+  }
+  aside h1 { font-size: 1.05em; margin: 0 0 12px 0; }
+  aside p { color: var(--dim); font-size: 0.9em; }
+  aside .legend { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 12px; }
+  aside .legend span { display: inline-flex; align-items: center; gap: 6px; font-size: 0.85em; }
+  aside .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  main { position: relative; overflow: hidden; }
+  #cy { width: 100%; height: 100%; background:
+        radial-gradient(ellipse at center, #161922 0%, #0a0c10 100%); display: block; }
+  #hover {
+    position: absolute; top: 12px; right: 12px;
+    background: rgba(22, 25, 34, 0.95); border: 1px solid var(--border);
+    border-radius: 6px; padding: 10px 14px; font-size: 0.88em;
+    max-width: 320px; pointer-events: none; opacity: 0;
+    transition: opacity 0.15s ease;
+  }
+  #hover.visible { opacity: 1; }
+  #hover .h { font-weight: 600; margin-bottom: 4px; }
+  #hover .d { font-size: 0.85em; color: var(--dim); }
+  #hover .snip { font-family: monospace; font-size: 0.78em; margin-top: 6px;
+                 color: var(--text); white-space: pre-wrap; max-height: 6em; overflow: hidden; }
+  .controls { position: absolute; top: 12px; left: 12px; display: flex; gap: 6px; }
+  .controls button { background: var(--panel); color: var(--text); border: 1px solid var(--border);
+                     border-radius: 4px; padding: 6px 12px; cursor: pointer; }
+  .controls button:hover { background: var(--border); }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <aside>
+    <h1>ContextKernel · Graph</h1>
+    <p>Each node is a knowledge item; edges follow <code>data-rel</code>
+       relations between them. Drag nodes to perturb; scroll to zoom;
+       click to open the item's HTML in a new tab.</p>
+    <div class="legend">
+      <span><span class="dot" style="background:#c678dd"></span>fact</span>
+      <span><span class="dot" style="background:#98c379"></span>preference</span>
+      <span><span class="dot" style="background:#e06c75"></span>constraint</span>
+      <span><span class="dot" style="background:#e5c07b"></span>assumption</span>
+      <span><span class="dot" style="background:#61afef"></span>decision</span>
+      <span><span class="dot" style="background:#56b6c2"></span>method</span>
+      <span><span class="dot" style="background:#abb2bf"></span>other</span>
+    </div>
+    <p style="margin-top: 22px;">
+      <a href="/vault/stats" style="color: var(--accent);">/vault/stats</a><br>
+      <a href="/review/queue?status=pending" style="color: var(--accent);">/review/queue</a>
+    </p>
+  </aside>
+  <main>
+    <div class="controls">
+      <button id="btn-reheat">Re-heat</button>
+    </div>
+    <canvas id="cy"></canvas>
+    <div id="hover"></div>
+  </main>
+</div>
+
+<script>
+const COLORS = {
+  fact: '#c678dd', preference: '#98c379', constraint: '#e06c75',
+  assumption: '#e5c07b', decision: '#61afef', method: '#56b6c2',
+  formula: '#56b6c2', source: '#abb2bf', template: '#abb2bf',
+  example: '#abb2bf', task: '#e5c07b', definition: '#61afef',
+  regulation: '#e06c75', warning: '#e06c75', relationship: '#abb2bf',
+  other: '#abb2bf'
+};
+
+const canvas = document.getElementById('cy');
+const ctx = canvas.getContext('2d');
+const hover = document.getElementById('hover');
+let nodes = [], links = [], sim = null, transform = d3.zoomIdentity;
+let hoverNode = null, draggingNode = null;
+let width = 0, height = 0;
+
+function resize() {
+  const r = canvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  width = r.width; height = r.height;
+  canvas.width = width * dpr; canvas.height = height * dpr;
+  canvas.style.width = width + 'px'; canvas.style.height = height + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  if (sim) { sim.force('center', d3.forceCenter(width/2, height/2).strength(0.04)); sim.alpha(0.4).restart(); }
+}
+
+function draw() {
+  ctx.save();
+  ctx.clearRect(0, 0, width, height);
+  ctx.translate(transform.x, transform.y); ctx.scale(transform.k, transform.k);
+  // edges
+  ctx.strokeStyle = 'rgba(110,193,228,0.22)'; ctx.lineWidth = 0.9 / transform.k;
+  ctx.beginPath();
+  for (const e of links) { ctx.moveTo(e.source.x, e.source.y); ctx.lineTo(e.target.x, e.target.y); }
+  ctx.stroke();
+  // nodes
+  for (const n of nodes) {
+    const r = n === hoverNode ? 9 : 6;
+    const color = COLORS[n.knowledge_type] || COLORS.other;
+    if (n === hoverNode) {
+      const g = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, r * 4);
+      g.addColorStop(0, color + 'cc'); g.addColorStop(1, color + '00');
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(n.x, n.y, r * 4, 0, Math.PI*2); ctx.fill();
+    }
+    ctx.beginPath(); ctx.fillStyle = color;
+    ctx.arc(n.x, n.y, r, 0, Math.PI*2); ctx.fill();
+    if (n === hoverNode) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5/transform.k; ctx.stroke(); }
+  }
+  // labels (hovered only unless zoomed in)
+  ctx.fillStyle = '#e0e3ea'; ctx.font = `${11/Math.max(transform.k,1)}px system-ui`;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  for (const n of nodes) {
+    if (n === hoverNode || transform.k > 1.6) { ctx.fillText(truncate(n.title, 30), n.x, n.y + 10); }
+  }
+  ctx.restore();
+}
+
+function nodeAt(clientX, clientY) {
+  const r = canvas.getBoundingClientRect();
+  const x = (clientX - r.left - transform.x) / transform.k;
+  const y = (clientY - r.top  - transform.y) / transform.k;
+  let best = null, bestD = 12 / transform.k;
+  for (const n of nodes) {
+    const d = Math.hypot(n.x - x, n.y - y);
+    if (d < bestD) { best = n; bestD = d; }
+  }
+  return best;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function truncate(s, n) { return s && s.length > n ? s.slice(0, n) + '…' : s || ''; }
+
+canvas.addEventListener('mousedown', e => {
+  const n = nodeAt(e.clientX, e.clientY);
+  if (n) { draggingNode = n; n.fx = n.x; n.fy = n.y; sim.alphaTarget(0.3).restart(); e.preventDefault(); }
+});
+canvas.addEventListener('mousemove', e => {
+  if (draggingNode) {
+    const r = canvas.getBoundingClientRect();
+    draggingNode.fx = (e.clientX - r.left - transform.x) / transform.k;
+    draggingNode.fy = (e.clientY - r.top  - transform.y) / transform.k;
+    return;
+  }
+  const n = nodeAt(e.clientX, e.clientY);
+  if (n !== hoverNode) {
+    hoverNode = n;
+    if (n) {
+      hover.innerHTML = `<div class="h">${escapeHtml(n.title)}</div>`
+        + `<div class="d">${escapeHtml(n.knowledge_type)} · ${escapeHtml(n.scope)}`
+        + (n.status && n.status !== 'active' ? ` · <em>${escapeHtml(n.status)}</em>` : '')
+        + `</div>`
+        + (n.snippet ? `<div class="snip">${escapeHtml(n.snippet)}</div>` : '');
+      hover.classList.add('visible');
+    } else {
+      hover.classList.remove('visible');
+    }
+    canvas.style.cursor = n ? 'pointer' : 'grab';
+  }
+});
+canvas.addEventListener('mouseup', () => {
+  if (draggingNode) {
+    draggingNode.fx = null; draggingNode.fy = null;
+    draggingNode = null; sim.alphaTarget(0.04);
+  }
+});
+canvas.addEventListener('click', e => {
+  const n = nodeAt(e.clientX, e.clientY);
+  if (n) {
+    // No item-detail page in MVP — fetch raw JSON for inspection instead.
+    window.open(`/knowledge/${encodeURIComponent(n.id)}`, '_blank');
+  }
+});
+
+d3.select(canvas).call(d3.zoom().scaleExtent([0.2, 6]).on('zoom', e => { transform = e.transform; }));
+document.getElementById('btn-reheat').addEventListener('click', () => sim && sim.alpha(0.8).restart());
+window.addEventListener('resize', resize);
+
+fetch('/graph/data').then(r => r.json()).then(data => {
+  nodes = data.nodes.map(n => ({ ...n }));
+  const idx = new Map(nodes.map(n => [n.id, n]));
+  links = data.edges.filter(e => idx.has(e.source) && idx.has(e.target));
+  sim = d3.forceSimulation(nodes)
+    .force('charge', d3.forceManyBody().strength(-200).distanceMax(420))
+    .force('link', d3.forceLink(links).id(d => d.id).distance(70).strength(0.5))
+    .force('center', d3.forceCenter(width/2, height/2).strength(0.04))
+    .force('collision', d3.forceCollide(11))
+    .velocityDecay(0.22).alphaDecay(0.008).alphaTarget(0.04)
+    .on('tick', draw);
+  resize();
+});
+</script>
+</body>
+</html>

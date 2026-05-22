@@ -1,15 +1,20 @@
-//! Deterministic rerank scoring.
+//! Deterministic rerank scoring with optional semantic signal.
 //!
-//! Session-1 mix (no semantic embeddings yet):
-//!     score = 0.45 * fts_proxy        (presence of any task token in body/title)
-//!           + 0.25 * lexical_overlap  (jaccard-style on word sets)
+//! When the semantic component is supplied (cosine on normalised
+//! embeddings, in [-1, 1]) it carries the most weight. The lexical
+//! signals stay as a hedge — out-of-distribution queries or items the
+//! embedder doesn't know about still surface via FTS + jaccard.
+//!
+//!     score = 0.55 * semantic                (cosine, embedder-supplied)
+//!           + 0.10 * fts_presence            (1.0 if FTS matched, else 0)
+//!           + 0.10 * lexical                 (jaccard on word sets)
 //!           + 0.10 * scope_priority
 //!           + 0.08 * recency
-//!           + 0.07 * confidence
-//!           + 0.05 * source_reliability
+//!           + 0.05 * confidence
+//!           + 0.02 * source_reliability
 //!
-//! Session 2 will replace `fts_proxy + lexical_overlap` with a cosine
-//! similarity term sourced from the embedding store.
+//! When no embedder is configured, `semantic` is 0 and the score still
+//! makes sense — it's just the lexical/metadata baseline.
 
 use crate::query::Query;
 use ctxk_core::KnowledgeItem;
@@ -17,8 +22,9 @@ use serde::Serialize;
 use std::collections::HashSet;
 use time::OffsetDateTime;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct Breakdown {
+    pub semantic: f64,
     pub fts: f64,
     pub lexical: f64,
     pub scope: f64,
@@ -27,24 +33,27 @@ pub struct Breakdown {
     pub source: f64,
 }
 
-pub fn score(item: &KnowledgeItem, q: &Query) -> (f64, Breakdown) {
-    let fts = fts_proxy(item, &q.task);
+pub fn score(item: &KnowledgeItem, q: &Query, semantic: f64, in_fts: bool) -> (f64, Breakdown) {
+    let semantic = semantic.clamp(-1.0, 1.0).max(0.0); // negatives don't help us
+    let fts = if in_fts { 1.0 } else { 0.0 };
     let lexical = lexical_overlap(item, &q.task);
     let scope = item.scope.priority();
     let recency = recency_decay(item);
     let confidence = item.confidence.clamp(0.0, 1.0);
     let source = item.source_type.reliability();
 
-    let total = 0.45 * fts
-        + 0.25 * lexical
+    let total = 0.55 * semantic
+        + 0.10 * fts
+        + 0.10 * lexical
         + 0.10 * scope
         + 0.08 * recency
-        + 0.07 * confidence
-        + 0.05 * source;
+        + 0.05 * confidence
+        + 0.02 * source;
 
     (
         total,
         Breakdown {
+            semantic,
             fts,
             lexical,
             scope,
@@ -53,26 +62,6 @@ pub fn score(item: &KnowledgeItem, q: &Query) -> (f64, Breakdown) {
             source,
         },
     )
-}
-
-fn fts_proxy(item: &KnowledgeItem, task: &str) -> f64 {
-    if task.trim().is_empty() {
-        return 0.0;
-    }
-    let hay = format!("{} {}", item.title, item.body_text).to_ascii_lowercase();
-    let tokens: Vec<&str> = task
-        .split_whitespace()
-        .map(|t| t.trim_matches(|c: char| !c.is_alphanumeric()))
-        .filter(|t| !t.is_empty())
-        .collect();
-    if tokens.is_empty() {
-        return 0.0;
-    }
-    let hits = tokens
-        .iter()
-        .filter(|t| hay.contains(&t.to_ascii_lowercase()))
-        .count();
-    (hits as f64) / (tokens.len() as f64)
 }
 
 fn lexical_overlap(item: &KnowledgeItem, task: &str) -> f64 {
@@ -107,6 +96,5 @@ fn recency_decay(item: &KnowledgeItem) -> f64 {
     let age_secs = (now - item.modified).whole_seconds().max(0) as f64;
     let age_days = age_secs / 86_400.0;
     let halflife = item.stability.halflife_days().max(1.0);
-    // exp(-ln(2) * age / halflife) → 1.0 at age=0, 0.5 at half-life
     (-(std::f64::consts::LN_2) * age_days / halflife).exp().clamp(0.0, 1.0)
 }

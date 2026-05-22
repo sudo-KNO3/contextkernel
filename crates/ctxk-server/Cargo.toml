@@ -10,6 +10,7 @@ description = "HTTP server (axum) exposing ContextKernel to AI agents and client
 [dependencies]
 ctxk-core.workspace      = true
 ctxk-store.workspace     = true
+ctxk-embed.workspace     = true
 ctxk-retrieval.workspace = true
 
 axum.workspace        = true

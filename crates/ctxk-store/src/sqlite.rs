@@ -9,7 +9,10 @@ use std::sync::Mutex;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
-const MIGRATIONS: &[&str] = &[include_str!("migrations/0001_init.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("migrations/0001_init.sql"),
+    include_str!("migrations/0002_embeddings.sql"),
+];
 
 /// Thin wrapper around `rusqlite::Connection` with a process-wide mutex,
 /// because SQLite is single-writer and we want predictable serialisation.
@@ -19,7 +22,8 @@ pub struct Store {
 }
 
 impl Store {
-    /// Open or create the SQLite index at `db_path`, applying migrations.
+    /// Open or create the SQLite index at `db_path`, applying migrations
+    /// idempotently via `PRAGMA user_version`.
     pub fn open(db_path: impl Into<PathBuf>) -> Result<Self> {
         let db_path = db_path.into();
         if let Some(parent) = db_path.parent() {
@@ -27,10 +31,25 @@ impl Store {
         }
         let conn = Connection::open(&db_path)
             .map_err(|e| ctxk_core::Error::Other(format!("opening {}: {e}", db_path.display())))?;
-        for sql in MIGRATIONS {
-            conn.execute_batch(sql)
-                .map_err(|e| ctxk_core::Error::Other(format!("migration: {e}")))?;
+
+        let current: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap_or(0);
+        for (idx, sql) in MIGRATIONS.iter().enumerate() {
+            let migration_version = (idx + 1) as i64;
+            if migration_version <= current {
+                continue;
+            }
+            conn.execute_batch(sql).map_err(|e| {
+                ctxk_core::Error::Other(format!("migration {}: {e}", migration_version))
+            })?;
+            conn.execute(&format!("PRAGMA user_version = {}", migration_version), [])
+                .map_err(|e| {
+                    ctxk_core::Error::Other(format!("set user_version: {e}"))
+                })?;
+            tracing::info!("applied migration {}", migration_version);
         }
+
         Ok(Self {
             inner: Mutex::new(conn),
             db_path,
@@ -251,6 +270,90 @@ impl Store {
         })
     }
 
+    /// Persist a normalised embedding for an item.
+    pub fn set_embedding(&self, id: &str, embedding_bytes: &[u8]) -> Result<()> {
+        let conn = self.inner.lock().unwrap();
+        conn.execute(
+            "UPDATE items SET embedding = ?1 WHERE id = ?2",
+            params![embedding_bytes, id],
+        )
+        .map_err(|e| ctxk_core::Error::Other(format!("set_embedding: {e}")))?;
+        Ok(())
+    }
+
+    /// Read the embedding for an item, if present.
+    pub fn get_embedding(&self, id: &str) -> Result<Option<Vec<u8>>> {
+        let conn = self.inner.lock().unwrap();
+        conn.query_row(
+            "SELECT embedding FROM items WHERE id = ?1",
+            params![id],
+            |r| r.get::<_, Option<Vec<u8>>>(0),
+        )
+        .optional()
+        .map(|opt| opt.flatten())
+        .map_err(|e| ctxk_core::Error::Other(format!("get_embedding: {e}")))
+    }
+
+    /// Stream every (id, embedding bytes) pair where the embedding is present.
+    /// Filter to active items by default; pass `include_status` to widen.
+    pub fn list_embeddings(
+        &self,
+        scope: Option<&str>,
+        include_status: &[&str],
+    ) -> Result<Vec<(String, Vec<u8>)>> {
+        let conn = self.inner.lock().unwrap();
+        let mut sql = String::from(
+            "SELECT id, embedding FROM items WHERE embedding IS NOT NULL",
+        );
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(s) = scope {
+            sql.push_str(" AND scope = ?");
+            args.push(Box::new(s.to_string()));
+        }
+        if include_status.is_empty() {
+            sql.push_str(" AND status != 'deleted'");
+        } else {
+            let placeholders = vec!["?"; include_status.len()].join(", ");
+            sql.push_str(&format!(" AND status IN ({})", placeholders));
+            for s in include_status {
+                args.push(Box::new(s.to_string()));
+            }
+        }
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| ctxk_core::Error::Other(format!("prepare list_embeddings: {e}")))?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(args.iter()), |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+            })
+            .map_err(|e| ctxk_core::Error::Other(format!("list_embeddings: {e}")))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| ctxk_core::Error::Other(format!("collect list_embeddings: {e}")))
+    }
+
+    /// Read a schema_meta value.
+    pub fn get_meta(&self, key: &str) -> Result<Option<String>> {
+        let conn = self.inner.lock().unwrap();
+        conn.query_row(
+            "SELECT value FROM schema_meta WHERE key = ?1",
+            params![key],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| ctxk_core::Error::Other(format!("get_meta: {e}")))
+    }
+
+    pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
+        let conn = self.inner.lock().unwrap();
+        conn.execute(
+            "INSERT INTO schema_meta(key, value) VALUES(?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![key, value],
+        )
+        .map_err(|e| ctxk_core::Error::Other(format!("set_meta: {e}")))?;
+        Ok(())
+    }
+
     /// Mark items past `valid_until` as stale (lazy sweep called before queries).
     pub fn sweep_stale(&self) -> Result<usize> {
         let conn = self.inner.lock().unwrap();
@@ -282,6 +385,28 @@ impl Store {
         )
         .map_err(|e| ctxk_core::Error::Other(format!("queue_propose: {e}")))?;
         Ok(queue_id)
+    }
+
+    /// Mutate one queue entry — used by approve/reject.
+    pub fn update_queue_status(
+        &self,
+        queue_id: &str,
+        status: &str,
+        reviewed_by: Option<&str>,
+        reviewed_at: Option<&str>,
+        decision_note: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.inner.lock().unwrap();
+        conn.execute(
+            "UPDATE review_queue
+             SET status = ?1, reviewed_by = COALESCE(?2, reviewed_by),
+                 reviewed_at = COALESCE(?3, reviewed_at),
+                 decision_note = COALESCE(?4, decision_note)
+             WHERE id = ?5",
+            params![status, reviewed_by, reviewed_at, decision_note, queue_id],
+        )
+        .map_err(|e| ctxk_core::Error::Other(format!("update_queue_status: {e}")))?;
+        Ok(())
     }
 
     pub fn queue_list(&self, status: Option<&str>) -> Result<Vec<QueueEntry>> {

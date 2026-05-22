@@ -10,6 +10,7 @@ description = "Query, rerank, conflict detection, and context-bundle assembly"
 [dependencies]
 ctxk-core.workspace  = true
 ctxk-store.workspace = true
+ctxk-embed.workspace = true
 serde.workspace      = true
 serde_json.workspace = true
 time.workspace       = true

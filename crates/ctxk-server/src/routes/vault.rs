@@ -22,6 +22,7 @@ pub struct ReindexBody {
 pub struct ReindexResponse {
     pub files_scanned: usize,
     pub items_indexed: usize,
+    pub items_embedded: usize,
     pub files_skipped: usize,
     pub errors: Vec<String>,
 }
@@ -30,11 +31,44 @@ pub async fn reindex(
     State(state): State<AppState>,
     body: Option<Json<ReindexBody>>,
 ) -> Result<Json<ReindexResponse>, ApiError> {
-    let _ = body; // path-scoped reindex is a session-2 feature; full only for now
-    let report = state.vault.reindex_all().map_err(ApiError::internal)?;
+    let _ = body; // path-scoped reindex is a follow-on; full only for now
+    let embedder = state.embedder.as_deref();
+    let report = state
+        .vault
+        .reindex_all(embedder)
+        .map_err(ApiError::internal)?;
     Ok(Json(ReindexResponse {
         files_scanned: report.files_scanned,
         items_indexed: report.items_indexed,
+        items_embedded: report.items_embedded,
+        files_skipped: report.files_skipped,
+        errors: report
+            .errors
+            .into_iter()
+            .map(|(p, e)| format!("{}: {}", p.display(), e))
+            .collect(),
+    }))
+}
+
+/// Force a full re-embed by setting `embedding_model` to empty in
+/// schema_meta and reindexing — the reindex pass detects the mismatch
+/// and re-embeds every item.
+pub async fn reembed(State(state): State<AppState>) -> Result<Json<ReindexResponse>, ApiError> {
+    if state.embedder.is_none() {
+        return Err(ApiError::bad_request(
+            "server started without an embedder; restart with embedder enabled",
+        ));
+    }
+    let _ = state.vault.store.set_meta("embedding_model", "");
+    let embedder = state.embedder.as_deref();
+    let report = state
+        .vault
+        .reindex_all(embedder)
+        .map_err(ApiError::internal)?;
+    Ok(Json(ReindexResponse {
+        files_scanned: report.files_scanned,
+        items_indexed: report.items_indexed,
+        items_embedded: report.items_embedded,
         files_skipped: report.files_skipped,
         errors: report
             .errors

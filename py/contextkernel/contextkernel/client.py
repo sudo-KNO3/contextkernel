@@ -135,6 +135,36 @@ class ContextKernel:
         data = self._get("/review/queue", params=params)
         return [QueueEntry.model_validate(e) for e in data]
 
+    def approve(
+        self,
+        queue_id: str,
+        *,
+        target_file: Optional[str] = None,
+        scope_path: Optional[str] = None,
+        reviewed_by: str = "user",
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"reviewed_by": reviewed_by}
+        if target_file is not None:
+            body["target_file"] = target_file
+        if scope_path is not None:
+            body["scope_path"] = scope_path
+        return self._post(f"/review/queue/{queue_id}/approve", body)
+
+    def reject(
+        self,
+        queue_id: str,
+        *,
+        reviewed_by: str = "user",
+        note: Optional[str] = None,
+    ) -> dict[str, Any]:
+        body = {"reviewed_by": reviewed_by}
+        if note is not None:
+            body["note"] = note
+        return self._post(f"/review/queue/{queue_id}/reject", body)
+
+    def graph_data(self) -> dict[str, Any]:
+        return self._get("/graph/data")
+
     # ─── admin ──────────────────────────────────────────────────────────────
 
     def stats(self) -> VaultStats:
@@ -144,6 +174,9 @@ class ContextKernel:
     def reindex(self, path: Optional[str] = None) -> dict[str, Any]:
         body = {"path": path} if path else {}
         return self._post("/vault/reindex", body)
+
+    def reembed(self) -> dict[str, Any]:
+        return self._post("/vault/reembed", {})
 
     def health(self) -> bool:
         try:

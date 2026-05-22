@@ -11,6 +11,12 @@ __pycache__/
 .contextkernel/
 vault/
 
+# fastembed downloads the ONNX model here on first run; ~33 MB per model.
+.fastembed_cache/
+
+# Local smoke-test artefacts
+_smoke_vault/
+
 # Editor / OS
 .vscode/
 .idea/

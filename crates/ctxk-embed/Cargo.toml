@@ -1,0 +1,15 @@
+[package]
+name        = "ctxk-embed"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+repository.workspace = true
+description = "Process-wide embedding sidecar — fastembed-rs + ONNX runtime"
+
+[dependencies]
+ctxk-core.workspace = true
+fastembed           = "4"
+once_cell           = "1"
+thiserror.workspace = true
+tracing.workspace   = true
