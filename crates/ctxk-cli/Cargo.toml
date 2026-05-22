@@ -15,6 +15,7 @@ path = "src/main.rs"
 ctxk-core.workspace      = true
 ctxk-store.workspace     = true
 ctxk-embed.workspace     = true
+ctxk-code.workspace      = true
 ctxk-retrieval.workspace = true
 ctxk-server   = { path = "../ctxk-server" }
 

@@ -328,6 +328,9 @@ fn item_from_payload(payload: &serde_json::Value, proposed_by: &str) -> Knowledg
             })
             .unwrap_or_default(),
         claim_key: s("claim_key"),
+        defined_path: s("defined_path"),
+        defined_start_line: payload.get("defined_start_line").and_then(|v| v.as_u64()).map(|n| n as usize),
+        defined_end_line: payload.get("defined_end_line").and_then(|v| v.as_u64()).map(|n| n as usize),
     }
 }
 

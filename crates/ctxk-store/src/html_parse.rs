@@ -90,6 +90,10 @@ fn parse_section(el: scraper::ElementRef<'_>) -> Result<KnowledgeItem> {
         .collect();
     let claim_key = attr("data-claim-key").filter(|s| !s.is_empty());
 
+    // Code-aware attrs (Phase 3)
+    let defined_path = attr("data-path").filter(|s| !s.is_empty());
+    let (defined_start_line, defined_end_line) = parse_lines(attr("data-defined-at").as_deref());
+
     // Title = text of the first h1/h2/h3 within the section.
     let title_sel = Selector::parse("h1, h2, h3, h4").unwrap();
     let title = el
@@ -141,7 +145,24 @@ fn parse_section(el: scraper::ElementRef<'_>) -> Result<KnowledgeItem> {
         body_html,
         relations,
         claim_key,
+        defined_path,
+        defined_start_line,
+        defined_end_line,
     })
+}
+
+fn parse_lines(s: Option<&str>) -> (Option<usize>, Option<usize>) {
+    let s = match s {
+        Some(s) if !s.is_empty() => s,
+        _ => return (None, None),
+    };
+    if let Some((a, b)) = s.split_once('-') {
+        (a.trim().parse().ok(), b.trim().parse().ok())
+    } else if let Ok(n) = s.trim().parse() {
+        (Some(n), Some(n))
+    } else {
+        (None, None)
+    }
 }
 
 fn parse_date_only(s: &str) -> Option<OffsetDateTime> {

@@ -12,6 +12,7 @@ use time::OffsetDateTime;
 const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0001_init.sql"),
     include_str!("migrations/0002_embeddings.sql"),
+    include_str!("migrations/0003_code_location.sql"),
 ];
 
 /// Thin wrapper around `rusqlite::Connection` with a process-wide mutex,
@@ -78,10 +79,12 @@ impl Store {
                 id, file_path, file_offset, knowledge_type, scope, confidence,
                 source_type, status, stability, created, modified,
                 valid_from, valid_until, domain, title, body_text, body_html,
-                tags_concat, relations_json, claim_key, content_hash
+                tags_concat, relations_json, claim_key, content_hash,
+                defined_path, defined_start_line, defined_end_line
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
-                ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21
+                ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21,
+                ?22, ?23, ?24
             )
             ON CONFLICT(id) DO UPDATE SET
                 file_path=excluded.file_path,
@@ -103,7 +106,10 @@ impl Store {
                 tags_concat=excluded.tags_concat,
                 relations_json=excluded.relations_json,
                 claim_key=excluded.claim_key,
-                content_hash=excluded.content_hash",
+                content_hash=excluded.content_hash,
+                defined_path=excluded.defined_path,
+                defined_start_line=excluded.defined_start_line,
+                defined_end_line=excluded.defined_end_line",
             params![
                 item.id,
                 file_path,
@@ -126,6 +132,9 @@ impl Store {
                 relations_json,
                 claim_key,
                 content_hash(&item.body_text),
+                item.defined_path,
+                item.defined_start_line.map(|n| n as i64),
+                item.defined_end_line.map(|n| n as i64),
             ],
         )
         .map_err(|e| ctxk_core::Error::Other(format!("upsert items: {e}")))?;
@@ -195,13 +204,55 @@ impl Store {
         conn.query_row(
             "SELECT id, knowledge_type, scope, confidence, source_type, status, stability,
                     created, modified, valid_from, valid_until, domain, title, body_text,
-                    body_html, tags_concat, relations_json, claim_key
+                    body_html, tags_concat, relations_json, claim_key,
+                    defined_path, defined_start_line, defined_end_line
              FROM items WHERE id = ?1",
             params![id],
             row_to_item,
         )
         .optional()
         .map_err(|e| ctxk_core::Error::Other(format!("get_item: {e}")))
+    }
+
+    /// Return the IDs of every item whose `defined_path` exactly matches.
+    /// Used to resolve `anchor_path` at retrieval time.
+    pub fn items_at_path(&self, path: &str) -> Result<Vec<String>> {
+        let conn = self.inner.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT id FROM items WHERE defined_path = ?1")
+            .map_err(|e| ctxk_core::Error::Other(format!("prepare items_at_path: {e}")))?;
+        let rows = stmt
+            .query_map(params![path], |r| r.get::<_, String>(0))
+            .map_err(|e| ctxk_core::Error::Other(format!("items_at_path: {e}")))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| ctxk_core::Error::Other(format!("collect items_at_path: {e}")))
+    }
+
+    /// Return all `(src_id, rel, dst_id)` relations for fast BFS at
+    /// retrieval time. Bounded but fine for MVP scale.
+    pub fn all_relations(&self) -> Result<Vec<(String, String, String)>> {
+        let conn = self.inner.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT src_id, rel, dst_id FROM relations")
+            .map_err(|e| ctxk_core::Error::Other(format!("prepare all_relations: {e}")))?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .map_err(|e| ctxk_core::Error::Other(format!("all_relations: {e}")))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| ctxk_core::Error::Other(format!("collect all_relations: {e}")))
+    }
+
+    /// Return (item_id, defined_path) for every item that has one.
+    pub fn defined_paths(&self) -> Result<Vec<(String, String)>> {
+        let conn = self.inner.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT id, defined_path FROM items WHERE defined_path IS NOT NULL")
+            .map_err(|e| ctxk_core::Error::Other(format!("prepare defined_paths: {e}")))?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map_err(|e| ctxk_core::Error::Other(format!("defined_paths: {e}")))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| ctxk_core::Error::Other(format!("collect defined_paths: {e}")))
     }
 
     /// Free-form list with optional filters. `q` is FTS5 MATCH; the rest are
@@ -521,6 +572,9 @@ fn row_to_item(row: &rusqlite::Row) -> rusqlite::Result<KnowledgeItem> {
     let tags_concat: String = row.get(15)?;
     let relations_json: String = row.get(16)?;
     let claim_key: Option<String> = row.get(17)?;
+    let defined_path: Option<String> = row.get(18).ok().flatten();
+    let defined_start_line: Option<i64> = row.get(19).ok().flatten();
+    let defined_end_line: Option<i64> = row.get(20).ok().flatten();
 
     let tags = if tags_concat.trim().is_empty() {
         Vec::new()
@@ -548,6 +602,9 @@ fn row_to_item(row: &rusqlite::Row) -> rusqlite::Result<KnowledgeItem> {
         body_html,
         relations,
         claim_key,
+        defined_path,
+        defined_start_line: defined_start_line.map(|n| n as usize),
+        defined_end_line: defined_end_line.map(|n| n as usize),
     })
 }
 
@@ -555,7 +612,8 @@ fn build_list_query(f: &ListFilters) -> (String, Vec<Box<dyn rusqlite::ToSql>>) 
     let mut sql = String::from(
         "SELECT i.id, i.knowledge_type, i.scope, i.confidence, i.source_type, i.status, i.stability,
                 i.created, i.modified, i.valid_from, i.valid_until, i.domain, i.title, i.body_text,
-                i.body_html, i.tags_concat, i.relations_json, i.claim_key
+                i.body_html, i.tags_concat, i.relations_json, i.claim_key,
+                i.defined_path, i.defined_start_line, i.defined_end_line
          FROM items i",
     );
     let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();

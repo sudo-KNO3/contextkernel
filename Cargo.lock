@@ -557,6 +557,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "ctxk-code",
  "ctxk-core",
  "ctxk-embed",
  "ctxk-retrieval",
@@ -567,6 +568,23 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "ctxk-code"
+version = "0.1.0"
+dependencies = [
+ "ctxk-core",
+ "ctxk-store",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "time",
+ "tracing",
+ "tree-sitter",
+ "tree-sitter-rust",
+ "ulid",
+ "walkdir",
 ]
 
 [[package]]
@@ -3348,6 +3366,26 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
+]
+
+[[package]]
+name = "tree-sitter"
+version = "0.22.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df7cc499ceadd4dcdf7ec6d4cbc34ece92c3fa07821e287aedecd4416c516dca"
+dependencies = [
+ "cc",
+ "regex",
+]
+
+[[package]]
+name = "tree-sitter-rust"
+version = "0.21.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "277690f420bf90741dea984f3da038ace46c4fe6047cba57a66822226cde1c93"
+dependencies = [
+ "cc",
+ "tree-sitter",
 ]
 
 [[package]]

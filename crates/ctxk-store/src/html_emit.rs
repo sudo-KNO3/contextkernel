@@ -49,6 +49,12 @@ pub fn emit_section(item: &KnowledgeItem) -> String {
     if let Some(ck) = &item.claim_key {
         push_attr(&mut s, "data-claim-key", ck);
     }
+    if let Some(p) = &item.defined_path {
+        push_attr(&mut s, "data-path", p);
+    }
+    if let (Some(s_line), Some(e_line)) = (item.defined_start_line, item.defined_end_line) {
+        push_attr(&mut s, "data-defined-at", &format!("{}-{}", s_line, e_line));
+    }
     s.push_str(">\n");
 
     s.push_str(&item.body_html);

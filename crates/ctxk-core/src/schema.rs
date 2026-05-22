@@ -285,6 +285,17 @@ pub struct KnowledgeItem {
     /// Optional explicit grouping key for conflict detection. If absent,
     /// the retrieval engine derives one from title + domain.
     pub claim_key: Option<String>,
+
+    // ── Code-aware fields (added by ctxk-code). All optional so non-code
+    //    items (regular knowledge) keep the original on-disk shape. ────────
+    /// Vault-relative path of the source file this item was extracted from
+    /// (e.g. `crates/ctxk-store/src/sqlite.rs`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub defined_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub defined_start_line: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub defined_end_line: Option<usize>,
 }
 
 impl KnowledgeItem {

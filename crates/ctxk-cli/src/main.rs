@@ -61,6 +61,18 @@ enum Command {
         #[arg(long)]
         file: PathBuf,
     },
+
+    /// Walk a code root, parse with tree-sitter (Rust only for now),
+    /// emit one knowledge item per top-level definition into the vault
+    /// under code/<project>/, then reindex + embed.
+    IndexCode {
+        /// Path to the codebase root.
+        #[arg(long)]
+        root: PathBuf,
+        /// Project name (becomes the vault subdirectory + a tag).
+        #[arg(long)]
+        project: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -95,7 +107,39 @@ fn main() -> Result<()> {
             search_cmd(vault_path, query, scope, knowledge_type, max_items, embedder.as_deref())
         }
         Command::Propose { file } => propose_cmd(vault_path, file),
+        Command::IndexCode { root, project } => {
+            index_code_cmd(vault_path, root, project, embedder.as_deref())
+        }
     }
+}
+
+fn index_code_cmd(
+    vault_path: PathBuf,
+    code_root: PathBuf,
+    project: String,
+    embedder: Option<&dyn EmbedderProvider>,
+) -> Result<()> {
+    let vault = Vault::open(&vault_path).context("open vault")?;
+    let indexer = ctxk_code::walker::CodeIndexer {
+        project_name: &project,
+        project_root: &code_root,
+        vault_root: &vault.root,
+    };
+    let (report, _written) = indexer.run().context("walk + emit")?;
+    println!(
+        "Code index: {} files parsed → {} symbols → {} HTML files written",
+        report.files_parsed, report.symbols_emitted, report.files_written
+    );
+    for (p, e) in &report.errors {
+        eprintln!("  ! {}: {}", p.display(), e);
+    }
+    // Reindex the whole vault so new items land in SQLite + FTS + embeddings.
+    let r = vault.reindex_all(embedder).context("reindex after code emit")?;
+    println!(
+        "Vault reindex: {} files, {} items, {} embeddings",
+        r.files_scanned, r.items_indexed, r.items_embedded
+    );
+    Ok(())
 }
 
 fn resolve_vault_path(cli: &Cli) -> Result<PathBuf> {

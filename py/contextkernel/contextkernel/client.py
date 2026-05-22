@@ -47,6 +47,8 @@ class ContextKernel:
         include_stale: bool = False,
         max_items: int = 12,
         include_conflicts: bool = True,
+        anchor_path: Optional[str] = None,
+        anchor_id: Optional[str] = None,
     ) -> ContextBundle:
         body: dict[str, Any] = {
             "task": task,
@@ -64,6 +66,10 @@ class ContextKernel:
             body["domains"] = domains
         if tags_any is not None:
             body["tags_any"] = tags_any
+        if anchor_path is not None:
+            body["anchor_path"] = anchor_path
+        if anchor_id is not None:
+            body["anchor_id"] = anchor_id
         data = self._post("/context/query", body)
         return ContextBundle.model_validate(data)
 

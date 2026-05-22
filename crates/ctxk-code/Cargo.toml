@@ -1,0 +1,21 @@
+[package]
+name        = "ctxk-code"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+repository.workspace = true
+description = "Source-code ingestion: tree-sitter parse → KnowledgeItems with call-graph edges"
+
+[dependencies]
+ctxk-core.workspace  = true
+ctxk-store.workspace = true
+tree-sitter          = "0.22"
+tree-sitter-rust     = "0.21"
+walkdir.workspace    = true
+serde.workspace      = true
+serde_json.workspace = true
+time.workspace       = true
+thiserror.workspace  = true
+tracing.workspace    = true
+ulid.workspace       = true
